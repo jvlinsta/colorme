@@ -1,6 +1,7 @@
 // ============================================================
 // ColorMe - Drawing & Coloring App for Kids
 // ============================================================
+const APP_VERSION = '360b936';
 
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
@@ -18,9 +19,18 @@ const MAX_UNDO = 30;
 // ============ SD-Turbo Constants ============
 const SD_TURBO_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main';
 const SD_TURBO_MODELS = {
-  text_encoder: { url: 'text_encoder/model.onnx', size: 650 },
-  unet: { url: 'unet/model.onnx', size: 1653 },
-  vae_decoder: { url: 'vae_decoder/model.onnx', size: 94 },
+  text_encoder: {
+    url: 'text_encoder/model.onnx', size: 650,
+    opt: { freeDimensionOverrides: { batch_size: 1 } },
+  },
+  unet: {
+    url: 'unet/model.onnx', size: 1653,
+    opt: { freeDimensionOverrides: { batch_size: 1, num_channels: 4, height: 64, width: 64, sequence_length: 77 } },
+  },
+  vae_decoder: {
+    url: 'vae_decoder/model.onnx', size: 94,
+    opt: { freeDimensionOverrides: { batch_size: 1, num_channels_latent: 4, height_latent: 64, width_latent: 64 } },
+  },
 };
 const TOKENIZER_MODEL = 'Xenova/clip-vit-base-patch16';
 const PROMPT_PREFIX = 'kawaii cute simple ';
@@ -194,6 +204,9 @@ async function init() {
   svgContainer = document.getElementById('coloring-svg');
   emptyState = document.getElementById('empty-state');
 
+  const vTag = document.getElementById('version-tag');
+  if (vTag) vTag.textContent = APP_VERSION;
+
   setupCanvas();
   setupPalette();
   setupToolbar();
@@ -211,7 +224,8 @@ async function checkWebGPU() {
   if (!navigator.gpu) return false;
   try {
     const adapter = await navigator.gpu.requestAdapter();
-    return !!adapter;
+    if (!adapter) return false;
+    return adapter.features.has('shader-f16');
   } catch { return false; }
 }
 
@@ -799,10 +813,11 @@ async function initSDTurbo() {
 
   let downloadedMB = 0;
 
-  const sessionOpts = {
+  const baseOpts = {
     executionProviders: ['webgpu'],
     enableMemPattern: false,
     enableCpuMemArena: false,
+    preferredOutputLocation: { last_hidden_state: 'gpu-buffer' },
     extra: {
       session: {
         disable_prepacking: '1',
@@ -822,7 +837,8 @@ async function initSDTurbo() {
     downloadedMB += model.size;
 
     updateLoading(`Loading ${name}...`, null);
-    sdSessions[name] = await ort.InferenceSession.create(bytes, sessionOpts);
+    const sessOpts = { ...baseOpts, ...model.opt };
+    sdSessions[name] = await ort.InferenceSession.create(bytes, sessOpts);
   }
 }
 
