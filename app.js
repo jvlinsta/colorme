@@ -1,7 +1,7 @@
 // ============================================================
 // ColorMe - Drawing & Coloring App for Kids
 // ============================================================
-const APP_VERSION_URL = 'https://api.github.com/repos/jvlinsta/colorme/commits/main';
+const APP_VERSION = 'b31e446';
 
 import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
@@ -204,10 +204,8 @@ async function init() {
   svgContainer = document.getElementById('coloring-svg');
   emptyState = document.getElementById('empty-state');
 
-  fetch(APP_VERSION_URL).then(r => r.json()).then(d => {
-    const vTag = document.getElementById('version-tag');
-    if (vTag) vTag.textContent = d.sha.slice(0, 7);
-  }).catch(() => {});
+  const vTag = document.getElementById('version-tag');
+  if (vTag) vTag.textContent = APP_VERSION;
 
   setupCanvas();
   setupPalette();
