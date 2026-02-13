@@ -772,7 +772,11 @@ async function fetchModelCached(modelUrl, sizeMB, onProgress) {
   }
 
   const blob = new Blob(chunks);
-  await cache.put(modelUrl, new Response(blob));
+  try {
+    await cache.put(modelUrl, new Response(blob.slice()));
+  } catch (e) {
+    console.warn('Cache storage full, model will be re-downloaded next time:', e.message);
+  }
   return await blob.arrayBuffer();
 }
 
