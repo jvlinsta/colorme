@@ -885,7 +885,7 @@ async function runSDTurbo(prompt) {
   const scaledLatent = scaleModelInput(latent);
 
   // 4. UNet denoise (single step for Turbo)
-  const timestep = new ort.Tensor('int64', BigInt64Array.from([999n]), [1]);
+  const timestep = new ort.Tensor('float32', Float32Array.from([999]), [1]);
   const unetResult = await sdSessions.unet.run({
     sample: scaledLatent,
     timestep: timestep,
