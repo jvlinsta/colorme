@@ -72,6 +72,7 @@
 
     <!-- Canvas Area -->
     <div id="canvas-container">
+      <canvas id="background-canvas"></canvas>
       <svg id="coloring-svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
       <canvas id="drawing-canvas"></canvas>
       <div id="empty-state">
@@ -113,7 +114,7 @@
           <input type="text" id="prompt-input" placeholder="a happy dinosaur, a princess castle..." autocomplete="off">
           <button id="btn-generate">Create!</button>
         </div>
-        <p class="hint">Runs AI locally in your browser — no account needed.</p>
+        <p class="hint">Generates images with AI locally in your browser (requires Chrome 121+, ~2.4 GB first download).</p>
       </div>
       <div id="loading" class="hidden">
         <div class="progress-container">
@@ -124,6 +125,7 @@
     </div>
   </div>
 
+  <script src="https://cdn.jsdelivr.net/npm/onnxruntime-web@1.21.0/dist/ort.webgpu.min.js"></script>
   <script type="module" src="app.js"></script>
 </body>
 </html>

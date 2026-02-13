@@ -2,7 +2,7 @@
 // ColorMe - Drawing & Coloring App for Kids
 // ============================================================
 
-import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
 
 // ============ Constants ============
 const COLORS = [
@@ -13,8 +13,24 @@ const COLORS = [
   '#808080', '#FFFFFF',
 ];
 
-const MODEL_ID = 'onnx-community/Qwen2.5-Coder-1.5B-Instruct';
 const MAX_UNDO = 30;
+
+// ============ SD-Turbo Constants ============
+const SD_TURBO_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main';
+const SD_TURBO_MODELS = {
+  text_encoder: { url: 'text_encoder/model.onnx', size: 650 },
+  unet: { url: 'unet/model.onnx', size: 1653 },
+  vae_decoder: { url: 'vae_decoder/model.onnx', size: 94 },
+};
+const TOKENIZER_MODEL = 'Xenova/clip-vit-base-patch16';
+const PROMPT_PREFIX = 'kawaii cute simple ';
+const PROMPT_SUFFIX = ', white background, centered, simple, flat colors, no detail';
+const NEGATIVE_PROMPT = 'detailed, realistic, photographic, complex background, scenery, texture, text, watermark, multiple objects, frame, border, pattern';
+const TOTAL_MODEL_MB = 650 + 1653 + 94;
+
+// SD-Turbo scheduler constants
+const SIGMA = 14.6146;
+const VAE_SCALING = 0.18215;
 
 // ============ State ============
 const state = {
@@ -27,14 +43,17 @@ const state = {
   strokes: [],
   currentStroke: null,
   hasSVG: false,
+  hasRasterBG: false,
 };
 
 // ============ Model State ============
-let generator = null;
-let modelInitPromise = null;
+const sdSessions = {};
+let sdTokenizer = null;
+let sdInitPromise = null;
+let hasWebGPU = false;
 
 // ============ DOM Refs ============
-let canvas, ctx, svgContainer, emptyState;
+let canvas, ctx, bgCanvas, bgCtx, svgContainer, emptyState;
 
 // ============ Built-in Templates ============
 const TEMPLATES = [
@@ -167,9 +186,11 @@ const TEMPLATES = [
 // ============ Initialization ============
 document.addEventListener('DOMContentLoaded', init);
 
-function init() {
+async function init() {
   canvas = document.getElementById('drawing-canvas');
   ctx = canvas.getContext('2d');
+  bgCanvas = document.getElementById('background-canvas');
+  bgCtx = bgCanvas.getContext('2d');
   svgContainer = document.getElementById('coloring-svg');
   emptyState = document.getElementById('empty-state');
 
@@ -177,6 +198,21 @@ function init() {
   setupPalette();
   setupToolbar();
   setupModals();
+
+  hasWebGPU = await checkWebGPU();
+  if (!hasWebGPU) {
+    const hint = document.querySelector('#ai-section .hint');
+    if (hint) hint.textContent = 'AI generation requires Chrome 121+ with WebGPU. Use templates instead.';
+  }
+}
+
+async function checkWebGPU() {
+  if (typeof ort === 'undefined') return false;
+  if (!navigator.gpu) return false;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return !!adapter;
+  } catch { return false; }
 }
 
 // ============ Canvas Setup ============
@@ -202,12 +238,15 @@ function resizeCanvas() {
 
   canvas.width = rect.width * dpr;
   canvas.height = rect.height * dpr;
+  bgCanvas.width = rect.width * dpr;
+  bgCanvas.height = rect.height * dpr;
 
   ctx.scale(dpr, dpr);
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
   redrawAllStrokes();
+  redrawBackground();
 }
 
 // ============ Drawing ============
@@ -226,7 +265,14 @@ function getEventPos(e) {
 }
 
 function startDrawing(e) {
-  if (state.tool === 'fill') return;
+  if (state.tool === 'fill') {
+    if (state.hasRasterBG) {
+      e.preventDefault();
+      const pos = getEventPos(e);
+      rasterFloodFill(pos.x, pos.y, state.color);
+    }
+    return;
+  }
   if (e.touches && e.touches.length > 1) return;
   e.preventDefault();
 
@@ -339,7 +385,7 @@ function undo() {
   if (state.strokes.length === 0) return;
   state.strokes.pop();
   redrawAllStrokes();
-  if (state.strokes.length === 0 && !state.hasSVG) {
+  if (state.strokes.length === 0 && !state.hasSVG && !state.hasRasterBG) {
     showEmptyState();
   }
 }
@@ -357,6 +403,11 @@ function clearAll() {
   svgContainer.innerHTML = '';
   svgContainer.removeAttribute('viewBox');
   state.hasSVG = false;
+
+  bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+  state.hasRasterBG = false;
+  state._rasterImageData = null;
+
   showEmptyState();
 }
 
@@ -369,13 +420,19 @@ function setTool(tool) {
   });
   document.getElementById(`btn-${tool}`).classList.add('active');
 
-  if (tool === 'fill' && state.hasSVG) {
-    canvas.style.pointerEvents = 'none';
-    svgContainer.style.pointerEvents = 'auto';
-    canvas.style.cursor = 'default';
-  } else if (tool === 'fill' && !state.hasSVG) {
-    setTool('draw');
-    return;
+  if (tool === 'fill') {
+    if (state.hasSVG) {
+      canvas.style.pointerEvents = 'none';
+      svgContainer.style.pointerEvents = 'auto';
+      canvas.style.cursor = 'default';
+    } else if (state.hasRasterBG) {
+      canvas.style.pointerEvents = 'auto';
+      svgContainer.style.pointerEvents = 'none';
+      canvas.style.cursor = 'crosshair';
+    } else {
+      setTool('draw');
+      return;
+    }
   } else {
     canvas.style.pointerEvents = 'auto';
     svgContainer.style.pointerEvents = 'none';
@@ -403,7 +460,6 @@ function loadSVG(svgString) {
     return;
   }
 
-  // Sanitize
   svg.querySelectorAll('script').forEach(el => el.remove());
   svg.querySelectorAll('*').forEach(el => {
     Array.from(el.attributes).forEach(attr => {
@@ -439,6 +495,9 @@ function loadSVG(svgString) {
 
   state.hasSVG = true;
   clearCanvas();
+  bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
+  state.hasRasterBG = false;
+  state._rasterImageData = null;
   hideEmptyState();
 }
 
@@ -450,6 +509,112 @@ function handleSVGFill(e) {
   if (target.classList.contains('colorable')) {
     target.setAttribute('fill', state.color);
   }
+}
+
+// ============ Background Canvas (Raster Coloring Pages) ============
+function displayColoringPage(imageData) {
+  state._rasterImageData = imageData;
+  state.hasRasterBG = true;
+
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = imageData.width;
+  tempCanvas.height = imageData.height;
+  tempCanvas.getContext('2d').putImageData(imageData, 0, 0);
+
+  bgCtx.setTransform(1, 0, 0, 1, 0, 0);
+  bgCtx.drawImage(tempCanvas, 0, 0, bgCanvas.width, bgCanvas.height);
+
+  svgContainer.innerHTML = '';
+  svgContainer.removeAttribute('viewBox');
+  state.hasSVG = false;
+
+  clearCanvas();
+  hideEmptyState();
+}
+
+function redrawBackground() {
+  if (!state._rasterImageData) return;
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = state._rasterImageData.width;
+  tempCanvas.height = state._rasterImageData.height;
+  tempCanvas.getContext('2d').putImageData(state._rasterImageData, 0, 0);
+  bgCtx.setTransform(1, 0, 0, 1, 0, 0);
+  bgCtx.drawImage(tempCanvas, 0, 0, bgCanvas.width, bgCanvas.height);
+}
+
+// ============ Raster Flood Fill ============
+function rasterFloodFill(x, y, fillColor) {
+  const dpr = window.devicePixelRatio || 1;
+  const px = Math.floor(x * dpr);
+  const py = Math.floor(y * dpr);
+  const w = canvas.width;
+  const h = canvas.height;
+
+  if (px < 0 || px >= w || py < 0 || py >= h) return;
+
+  const bgData = bgCtx.getImageData(0, 0, w, h);
+  const fgData = ctx.getImageData(0, 0, w, h);
+
+  // Build boundary map: 1 = boundary (dark bg pixel or opaque fg pixel)
+  const boundary = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const bgLum = (bgData.data[i * 4] + bgData.data[i * 4 + 1] + bgData.data[i * 4 + 2]) / 3;
+    const fgA = fgData.data[i * 4 + 3];
+    boundary[i] = (bgLum < 128 || fgA > 128) ? 1 : 0;
+  }
+
+  const startIdx = py * w + px;
+  if (boundary[startIdx] === 1) return;
+
+  const fc = hexToRGBA(fillColor);
+  const visited = new Uint8Array(w * h);
+  const stack = [px, py];
+  visited[startIdx] = 1;
+
+  while (stack.length > 0) {
+    const cy = stack.pop();
+    const cx = stack.pop();
+
+    let left = cx;
+    while (left > 0 && boundary[cy * w + left - 1] === 0 && !visited[cy * w + left - 1]) {
+      left--;
+      visited[cy * w + left] = 1;
+    }
+
+    let right = cx;
+    while (right < w - 1 && boundary[cy * w + right + 1] === 0 && !visited[cy * w + right + 1]) {
+      right++;
+      visited[cy * w + right] = 1;
+    }
+
+    for (let i = left; i <= right; i++) {
+      const idx = (cy * w + i) * 4;
+      fgData.data[idx] = fc.r;
+      fgData.data[idx + 1] = fc.g;
+      fgData.data[idx + 2] = fc.b;
+      fgData.data[idx + 3] = 255;
+
+      if (cy > 0 && boundary[(cy - 1) * w + i] === 0 && !visited[(cy - 1) * w + i]) {
+        visited[(cy - 1) * w + i] = 1;
+        stack.push(i, cy - 1);
+      }
+      if (cy < h - 1 && boundary[(cy + 1) * w + i] === 0 && !visited[(cy + 1) * w + i]) {
+        visited[(cy + 1) * w + i] = 1;
+        stack.push(i, cy + 1);
+      }
+    }
+  }
+
+  ctx.putImageData(fgData, 0, 0);
+  hideEmptyState();
+}
+
+function hexToRGBA(hex) {
+  return {
+    r: parseInt(hex.slice(1, 3), 16),
+    g: parseInt(hex.slice(3, 5), 16),
+    b: parseInt(hex.slice(5, 7), 16),
+  };
 }
 
 // ============ Palette Setup ============
@@ -565,7 +730,7 @@ function setupTemplates() {
   });
 }
 
-// ============ Local AI Model ============
+// ============ SD-Turbo Model Loading ============
 function updateLoading(text, progress) {
   const loadingText = document.getElementById('loading-text');
   const progressBar = document.getElementById('progress-bar');
@@ -574,7 +739,6 @@ function updateLoading(text, progress) {
 
   if (progressBar) {
     if (progress === null || progress === undefined) {
-      // Indeterminate
       progressBar.classList.add('indeterminate');
       progressBar.style.width = '30%';
     } else {
@@ -584,51 +748,258 @@ function updateLoading(text, progress) {
   }
 }
 
-async function getGenerator() {
-  if (generator) return generator;
+async function fetchModelCached(modelUrl, sizeMB, onProgress) {
+  const cache = await caches.open('colorme-sd-turbo');
 
-  if (!modelInitPromise) {
-    modelInitPromise = pipeline('text-generation', MODEL_ID, {
-      dtype: 'q4f16',
-      device: 'webgpu',
-      progress_callback: (event) => {
-        if (event.status === 'progress' && event.progress != null) {
-          updateLoading(
-            `Downloading AI model... ${Math.round(event.progress)}%`,
-            event.progress
-          );
-        } else if (event.status === 'initiate') {
-          updateLoading('Downloading AI model...', 0);
-        } else if (event.status === 'done') {
-          updateLoading('Loading model into memory...', 100);
-        } else if (event.status === 'ready') {
-          updateLoading('Model ready!', 100);
-        }
-      },
-    }).catch(async (err) => {
-      // WebGPU failed — fall back to WASM
-      console.warn('WebGPU not available, falling back to WASM:', err.message);
-      updateLoading('Downloading AI model (CPU mode)...', 0);
-      return pipeline('text-generation', MODEL_ID, {
-        dtype: 'q4',
-        device: 'wasm',
-        progress_callback: (event) => {
-          if (event.status === 'progress' && event.progress != null) {
-            updateLoading(
-              `Downloading AI model... ${Math.round(event.progress)}%`,
-              event.progress
-            );
-          }
-        },
-      });
-    });
+  const cached = await cache.match(modelUrl);
+  if (cached) {
+    onProgress(sizeMB, sizeMB);
+    return await cached.arrayBuffer();
   }
 
-  generator = await modelInitPromise;
-  return generator;
+  const response = await fetch(modelUrl);
+  const reader = response.body.getReader();
+  const contentLength = +response.headers.get('Content-Length') || sizeMB * 1024 * 1024;
+  let received = 0;
+  const chunks = [];
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    onProgress(received / (1024 * 1024), sizeMB);
+  }
+
+  const blob = new Blob(chunks);
+  await cache.put(modelUrl, new Response(blob));
+  return await blob.arrayBuffer();
 }
 
+async function areModelsCached() {
+  try {
+    const cache = await caches.open('colorme-sd-turbo');
+    for (const model of Object.values(SD_TURBO_MODELS)) {
+      const url = `${SD_TURBO_BASE}/${model.url}`;
+      if (!(await cache.match(url))) return false;
+    }
+    return true;
+  } catch { return false; }
+}
+
+async function initSDTurbo() {
+  ort.env.wasm.numThreads = 1;
+  ort.env.wasm.simd = true;
+
+  sdTokenizer = await AutoTokenizer.from_pretrained(TOKENIZER_MODEL);
+
+  let downloadedMB = 0;
+
+  const sessionOpts = {
+    executionProviders: ['webgpu'],
+    enableMemPattern: false,
+    enableCpuMemArena: false,
+    extra: {
+      session: {
+        disable_prepacking: '1',
+        use_device_allocator_for_initializers: '1',
+        use_ort_model_bytes_directly: '1',
+        use_ort_model_bytes_for_initializers: '1',
+      }
+    },
+  };
+
+  for (const [name, model] of Object.entries(SD_TURBO_MODELS)) {
+    const url = `${SD_TURBO_BASE}/${model.url}`;
+    const bytes = await fetchModelCached(url, model.size, (fileMB) => {
+      const pct = ((downloadedMB + fileMB) / TOTAL_MODEL_MB) * 100;
+      updateLoading(`Downloading model... ${Math.round(pct)}%`, pct);
+    });
+    downloadedMB += model.size;
+
+    updateLoading(`Loading ${name}...`, null);
+    sdSessions[name] = await ort.InferenceSession.create(bytes, sessionOpts);
+  }
+}
+
+async function ensureSDModel() {
+  if (sdSessions.unet) return;
+  if (!sdInitPromise) {
+    sdInitPromise = initSDTurbo();
+  }
+  await sdInitPromise;
+}
+
+// ============ SD-Turbo Inference ============
+function generateLatentNoise() {
+  const size = 1 * 4 * 64 * 64;
+  const data = new Float32Array(size);
+  for (let i = 0; i < size; i++) {
+    const u = Math.random(), v = Math.random();
+    data[i] = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * SIGMA;
+  }
+  return new ort.Tensor('float32', data, [1, 4, 64, 64]);
+}
+
+function scaleModelInput(tensor) {
+  const divi = Math.sqrt(SIGMA * SIGMA + 1);
+  const out = new Float32Array(tensor.data.length);
+  for (let i = 0; i < tensor.data.length; i++) {
+    out[i] = tensor.data[i] / divi;
+  }
+  return new ort.Tensor('float32', out, tensor.dims);
+}
+
+function eulerStep(modelOutput, sample) {
+  const out = new Float32Array(modelOutput.data.length);
+  for (let i = 0; i < modelOutput.data.length; i++) {
+    const predOriginal = sample.data[i] - SIGMA * modelOutput.data[i];
+    const derivative = (sample.data[i] - predOriginal) / SIGMA;
+    const dt = 0 - SIGMA;
+    out[i] = (sample.data[i] + derivative * dt) / VAE_SCALING;
+  }
+  return new ort.Tensor('float32', out, modelOutput.dims);
+}
+
+async function runSDTurbo(prompt) {
+  const fullPrompt = PROMPT_PREFIX + prompt + PROMPT_SUFFIX;
+
+  // 1. Tokenize
+  const tokens = await sdTokenizer(fullPrompt, {
+    padding: 'max_length',
+    max_length: 77,
+    truncation: true,
+  });
+
+  // 2. Text encode
+  const inputIds = new ort.Tensor('int32', Int32Array.from(tokens.input_ids.data), [1, 77]);
+  const encoderResult = await sdSessions.text_encoder.run({ input_ids: inputIds });
+  const hiddenStates = encoderResult.last_hidden_state;
+
+  // 3. Generate random latent noise
+  const latent = generateLatentNoise();
+  const scaledLatent = scaleModelInput(latent);
+
+  // 4. UNet denoise (single step for Turbo)
+  const timestep = new ort.Tensor('int64', BigInt64Array.from([999n]), [1]);
+  const unetResult = await sdSessions.unet.run({
+    sample: scaledLatent,
+    timestep: timestep,
+    encoder_hidden_states: hiddenStates,
+  });
+  const noisePred = unetResult.out_sample;
+
+  // 5. Euler step → denoised latent
+  const denoised = eulerStep(noisePred, latent);
+
+  // 6. VAE decode
+  const vaeResult = await sdSessions.vae_decoder.run({ latent_sample: denoised });
+  const decoded = vaeResult.sample;
+
+  // 7. Convert tensor to ImageData (NCHW → RGBA)
+  const [, , imgH, imgW] = decoded.dims;
+  const imageData = new ImageData(imgW, imgH);
+  const pixels = decoded.data;
+  for (let y = 0; y < imgH; y++) {
+    for (let x = 0; x < imgW; x++) {
+      const srcIdx = y * imgW + x;
+      const dstIdx = (y * imgW + x) * 4;
+      const r = Math.round(Math.min(255, Math.max(0, (pixels[0 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
+      const g = Math.round(Math.min(255, Math.max(0, (pixels[1 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
+      const b = Math.round(Math.min(255, Math.max(0, (pixels[2 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
+      imageData.data[dstIdx] = r;
+      imageData.data[dstIdx + 1] = g;
+      imageData.data[dstIdx + 2] = b;
+      imageData.data[dstIdx + 3] = 255;
+    }
+  }
+
+  return imageData;
+}
+
+// ============ Post-processing: Raster → Coloring Page ============
+function toColoringPage(imageData) {
+  const { width, height } = imageData;
+  const { data } = imageData;
+
+  // 1. Grayscale
+  const gray = new Uint8Array(width * height);
+  for (let i = 0; i < width * height; i++) {
+    gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
+  }
+
+  // 2. Threshold: keep only dark outlines (< 80)
+  const binary = new Uint8Array(width * height);
+  for (let i = 0; i < gray.length; i++) {
+    binary[i] = gray[i] < 80 ? 0 : 255;
+  }
+
+  // 3. MinFilter(3): thicken lines (black expands)
+  const thick = minFilter(binary, width, height, 3);
+
+  // 4. MedianFilter(7): remove noise (majority vote on binary)
+  const clean = medianFilter(thick, width, height, 7);
+
+  // Convert back to RGBA ImageData
+  const result = new ImageData(width, height);
+  for (let i = 0; i < width * height; i++) {
+    result.data[i * 4] = clean[i];
+    result.data[i * 4 + 1] = clean[i];
+    result.data[i * 4 + 2] = clean[i];
+    result.data[i * 4 + 3] = 255;
+  }
+  return result;
+}
+
+function minFilter(data, width, height, size) {
+  const out = new Uint8Array(data.length);
+  const half = Math.floor(size / 2);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let min = 255;
+      for (let dy = -half; dy <= half; dy++) {
+        const ny = Math.min(height - 1, Math.max(0, y + dy));
+        for (let dx = -half; dx <= half; dx++) {
+          const nx = Math.min(width - 1, Math.max(0, x + dx));
+          const v = data[ny * width + nx];
+          if (v < min) min = v;
+        }
+      }
+      out[y * width + x] = min;
+    }
+  }
+  return out;
+}
+
+function medianFilter(data, width, height, size) {
+  const out = new Uint8Array(data.length);
+  const half = Math.floor(size / 2);
+  const total = size * size;
+  const majority = total >> 1;
+
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      let zeros = 0;
+      for (let dy = -half; dy <= half; dy++) {
+        const ny = Math.min(height - 1, Math.max(0, y + dy));
+        for (let dx = -half; dx <= half; dx++) {
+          const nx = Math.min(width - 1, Math.max(0, x + dx));
+          if (data[ny * width + nx] === 0) zeros++;
+        }
+      }
+      out[y * width + x] = zeros > majority ? 0 : 255;
+    }
+  }
+  return out;
+}
+
+// ============ Generate Coloring Page ============
 async function generateColoringPage(prompt) {
+  if (!hasWebGPU) {
+    alert('AI image generation requires a browser with WebGPU support (Chrome 121+).');
+    return;
+  }
+
   const inputRow = document.querySelector('#ai-section .input-row');
   const aiHint = document.querySelector('#ai-section .hint');
   const templateSection = document.getElementById('template-section');
@@ -639,47 +1010,24 @@ async function generateColoringPage(prompt) {
   templateSection.style.display = 'none';
   loading.classList.remove('hidden');
 
-  updateLoading('Preparing AI model...', null);
+  const cached = await areModelsCached();
+  if (cached) {
+    updateLoading('Loading AI model...', null);
+  } else {
+    updateLoading('Downloading AI model (~2.4 GB)... first time only', 0);
+  }
 
   try {
-    const gen = await getGenerator();
+    await ensureSDModel();
 
-    updateLoading('Generating coloring page...', null);
+    updateLoading('Generating image...', null);
+    const rawImage = await runSDTurbo(prompt);
 
-    const messages = [
-      {
-        role: 'system',
-        content: `You generate SVG coloring pages. Output ONLY valid SVG code, nothing else.
-Rules:
-- <svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
-- Use: rect, circle, ellipse, polygon, path
-- Each colorable region: class="colorable" fill="white" stroke="black" stroke-width="2"
-- Simple cute design, 8-15 large regions, centered
-- No text/script/style elements
-- Close all tags properly`
-      },
-      {
-        role: 'user',
-        content: `Generate SVG coloring page of: ${prompt}`
-      }
-    ];
+    updateLoading('Processing coloring page...', null);
+    const coloringPage = toColoringPage(rawImage);
 
-    const output = await gen(messages, {
-      max_new_tokens: 1500,
-      do_sample: true,
-      temperature: 0.7,
-      top_p: 0.9,
-    });
-
-    const reply = output[0].generated_text.at(-1).content;
-    const svgMatch = reply.match(/<svg[\s\S]*?<\/svg>/);
-
-    if (svgMatch) {
-      loadSVG(svgMatch[0]);
-      hideModal('create-modal');
-    } else {
-      throw new Error('Model did not produce valid SVG. Try a simpler description.');
-    }
+    displayColoringPage(coloringPage);
+    hideModal('create-modal');
   } catch (error) {
     console.error('Generation error:', error);
     alert('Could not create coloring page: ' + error.message);
@@ -707,6 +1055,12 @@ async function exportToPNG() {
   exportCtx.fillStyle = '#FFFFFF';
   exportCtx.fillRect(0, 0, cw, ch);
 
+  // Layer 1: raster coloring page background
+  if (state.hasRasterBG && bgCanvas) {
+    exportCtx.drawImage(bgCanvas, 0, 0, cw, ch);
+  }
+
+  // Layer 2: SVG template
   if (state.hasSVG) {
     try {
       const svgClone = svgContainer.cloneNode(true);
@@ -742,6 +1096,7 @@ async function exportToPNG() {
     }
   }
 
+  // Layer 3: drawing canvas
   exportCtx.drawImage(canvas, 0, 0, cw, ch);
 
   const link = document.createElement('a');
