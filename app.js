@@ -13,7 +13,7 @@ const COLORS = [
   '#808080', '#FFFFFF',
 ];
 
-const MODEL_ID = 'onnx-community/Qwen2.5-Coder-0.5B-Instruct';
+const MODEL_ID = 'onnx-community/Qwen2.5-Coder-1.5B-Instruct';
 const MAX_UNDO = 30;
 
 // ============ State ============
