@@ -2,6 +2,8 @@
 // ColorMe - Drawing & Coloring App for Kids
 // ============================================================
 
+import { pipeline } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+
 // ============ Constants ============
 const COLORS = [
   '#FF0000', '#FF6B35', '#FFD700', '#7CFC00',
@@ -11,7 +13,7 @@ const COLORS = [
   '#808080', '#FFFFFF',
 ];
 
-const BRUSH_SIZES = [4, 12, 24];
+const MODEL_ID = 'onnx-community/Qwen2.5-Coder-0.5B-Instruct';
 const MAX_UNDO = 30;
 
 // ============ State ============
@@ -25,8 +27,11 @@ const state = {
   strokes: [],
   currentStroke: null,
   hasSVG: false,
-  apiKey: localStorage.getItem('colorme-api-key') || '',
 };
+
+// ============ Model State ============
+let generator = null;
+let modelInitPromise = null;
 
 // ============ DOM Refs ============
 let canvas, ctx, svgContainer, emptyState;
@@ -88,7 +93,6 @@ const TEMPLATES = [
       <rect x="315" y="450" width="170" height="25" rx="5" fill="white" stroke="black" stroke-width="2" class="colorable"/>
       <rect x="390" y="260" width="20" height="195" fill="white" stroke="black" stroke-width="2" class="colorable"/>
       <ellipse cx="345" cy="385" rx="50" ry="18" transform="rotate(-30, 345, 385)" fill="white" stroke="black" stroke-width="2" class="colorable"/>
-      <line x1="345" y1="385" x2="345" y2="385" stroke="black" stroke-width="0"/>
       <ellipse cx="460" cy="350" rx="50" ry="18" transform="rotate(25, 460, 350)" fill="white" stroke="black" stroke-width="2" class="colorable"/>
       <ellipse cx="400" cy="130" rx="38" ry="62" fill="white" stroke="black" stroke-width="2" class="colorable"/>
       <ellipse cx="330" cy="165" rx="38" ry="62" transform="rotate(-60, 330, 165)" fill="white" stroke="black" stroke-width="2" class="colorable"/>
@@ -173,7 +177,6 @@ function init() {
   setupPalette();
   setupToolbar();
   setupModals();
-  checkApiKey();
 }
 
 // ============ Canvas Setup ============
@@ -181,13 +184,11 @@ function setupCanvas() {
   resizeCanvas();
   window.addEventListener('resize', resizeCanvas);
 
-  // Mouse events
   canvas.addEventListener('mousedown', startDrawing);
   canvas.addEventListener('mousemove', draw);
   canvas.addEventListener('mouseup', stopDrawing);
   canvas.addEventListener('mouseleave', stopDrawing);
 
-  // Touch events
   canvas.addEventListener('touchstart', startDrawing, { passive: false });
   canvas.addEventListener('touchmove', draw, { passive: false });
   canvas.addEventListener('touchend', stopDrawing);
@@ -226,7 +227,7 @@ function getEventPos(e) {
 
 function startDrawing(e) {
   if (state.tool === 'fill') return;
-  if (e.touches && e.touches.length > 1) return; // ignore multi-touch
+  if (e.touches && e.touches.length > 1) return;
   e.preventDefault();
 
   state.isDrawing = true;
@@ -242,7 +243,6 @@ function startDrawing(e) {
     isEraser: isEraser,
   };
 
-  // Draw initial dot
   ctx.save();
   if (isEraser) {
     ctx.globalCompositeOperation = 'destination-out';
@@ -285,21 +285,12 @@ function draw(e) {
 function stopDrawing() {
   if (state.currentStroke && state.currentStroke.points.length > 0) {
     state.strokes.push(state.currentStroke);
-    // Trim undo history
     if (state.strokes.length > MAX_UNDO) {
-      // Flatten oldest strokes into a background image
-      flattenOldStrokes();
+      state.strokes = state.strokes.slice(-MAX_UNDO);
     }
   }
   state.currentStroke = null;
   state.isDrawing = false;
-}
-
-function flattenOldStrokes() {
-  // Keep only the last MAX_UNDO strokes, flatten older ones
-  if (state.strokes.length <= MAX_UNDO) return;
-  // For simplicity, just keep the last MAX_UNDO strokes
-  state.strokes = state.strokes.slice(-MAX_UNDO);
 }
 
 function redrawAllStrokes() {
@@ -373,19 +364,16 @@ function clearAll() {
 function setTool(tool) {
   state.tool = tool;
 
-  // Update active button
   document.querySelectorAll('#btn-draw, #btn-fill, #btn-eraser').forEach(btn => {
     btn.classList.remove('active');
   });
   document.getElementById(`btn-${tool}`).classList.add('active');
 
-  // Toggle pointer events between canvas and SVG
   if (tool === 'fill' && state.hasSVG) {
     canvas.style.pointerEvents = 'none';
     svgContainer.style.pointerEvents = 'auto';
     canvas.style.cursor = 'default';
   } else if (tool === 'fill' && !state.hasSVG) {
-    // No SVG loaded - fall back to draw tool
     setTool('draw');
     return;
   } else {
@@ -415,27 +403,21 @@ function loadSVG(svgString) {
     return;
   }
 
-  // Sanitize: remove scripts and event handlers
+  // Sanitize
   svg.querySelectorAll('script').forEach(el => el.remove());
-  const allEls = svg.querySelectorAll('*');
-  allEls.forEach(el => {
+  svg.querySelectorAll('*').forEach(el => {
     Array.from(el.attributes).forEach(attr => {
-      if (attr.name.startsWith('on')) {
-        el.removeAttribute(attr.name);
-      }
+      if (attr.name.startsWith('on')) el.removeAttribute(attr.name);
     });
   });
 
-  // Ensure viewBox
   if (!svg.getAttribute('viewBox')) {
     svg.setAttribute('viewBox', '0 0 800 600');
   }
 
-  // Make all shape elements colorable
   const shapes = svg.querySelectorAll('path, circle, rect, ellipse, polygon, polyline');
   shapes.forEach((shape, i) => {
     if (!shape.classList.contains('colorable')) {
-      // Only add colorable to filled shapes
       const fill = shape.getAttribute('fill');
       if (fill && fill !== 'none' && fill !== 'transparent') {
         shape.classList.add('colorable');
@@ -444,19 +426,13 @@ function loadSVG(svgString) {
     if (!shape.id) shape.id = `region-${i}`;
   });
 
-  // Clear existing SVG
   svgContainer.innerHTML = '';
-
-  // Copy viewBox
   svgContainer.setAttribute('viewBox', svg.getAttribute('viewBox'));
 
-  // Copy children
   while (svg.firstChild) {
     svgContainer.appendChild(svg.firstChild);
   }
 
-  // Attach click handlers to colorable elements (use click only; touchend
-  // would double-fire because browsers synthesize a click after touchend)
   svgContainer.querySelectorAll('.colorable').forEach(shape => {
     shape.addEventListener('click', handleSVGFill);
   });
@@ -484,9 +460,7 @@ function setupPalette() {
     const swatch = document.createElement('button');
     swatch.className = 'color-swatch' + (i === 0 ? ' active' : '');
     swatch.style.backgroundColor = color;
-    if (color === '#FFFFFF') {
-      swatch.classList.add('white-swatch');
-    }
+    if (color === '#FFFFFF') swatch.classList.add('white-swatch');
     swatch.setAttribute('title', color);
 
     swatch.addEventListener('click', () => {
@@ -498,7 +472,6 @@ function setupPalette() {
     colorsDiv.appendChild(swatch);
   });
 
-  // Brush sizes
   document.querySelectorAll('.size-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       document.querySelectorAll('.size-btn').forEach(b => b.classList.remove('active'));
@@ -517,12 +490,10 @@ function setupToolbar() {
   document.getElementById('btn-clear').addEventListener('click', clearAll);
   document.getElementById('btn-create').addEventListener('click', () => showModal('create-modal'));
   document.getElementById('btn-export').addEventListener('click', exportToPNG);
-  document.getElementById('btn-settings').addEventListener('click', () => showModal('settings-modal'));
 }
 
 // ============ Modal Management ============
 function setupModals() {
-  // Close buttons
   document.querySelectorAll('.close-btn').forEach(btn => {
     btn.addEventListener('click', () => {
       const modalId = btn.dataset.modal;
@@ -530,7 +501,6 @@ function setupModals() {
     });
   });
 
-  // Overlay clicks
   document.querySelectorAll('.modal-overlay').forEach(overlay => {
     overlay.addEventListener('click', () => {
       const modal = overlay.closest('.modal');
@@ -538,10 +508,8 @@ function setupModals() {
     });
   });
 
-  // Template grid
   setupTemplates();
 
-  // AI generation
   const generateBtn = document.getElementById('btn-generate');
   const promptInput = document.getElementById('prompt-input');
 
@@ -556,25 +524,11 @@ function setupModals() {
       if (prompt) generateColoringPage(prompt);
     }
   });
-
-  // Settings
-  document.getElementById('btn-save-settings').addEventListener('click', saveSettings);
-  document.getElementById('api-key-input').value = state.apiKey;
-
-  // Link to settings from create modal
-  const openSettingsBtn = document.getElementById('btn-open-settings');
-  if (openSettingsBtn) {
-    openSettingsBtn.addEventListener('click', () => {
-      hideModal('create-modal');
-      showModal('settings-modal');
-    });
-  }
 }
 
 function showModal(id) {
   document.getElementById(id).classList.remove('hidden');
   if (id === 'create-modal') {
-    checkApiKey();
     document.getElementById('prompt-input').value = '';
     document.getElementById('prompt-input').focus();
   }
@@ -611,86 +565,120 @@ function setupTemplates() {
   });
 }
 
-// ============ API Key ============
-function checkApiKey() {
-  const hint = document.getElementById('api-hint');
-  if (!state.apiKey) {
-    hint.classList.remove('hidden');
-  } else {
-    hint.classList.add('hidden');
+// ============ Local AI Model ============
+function updateLoading(text, progress) {
+  const loadingText = document.getElementById('loading-text');
+  const progressBar = document.getElementById('progress-bar');
+
+  if (loadingText) loadingText.textContent = text;
+
+  if (progressBar) {
+    if (progress === null || progress === undefined) {
+      // Indeterminate
+      progressBar.classList.add('indeterminate');
+      progressBar.style.width = '30%';
+    } else {
+      progressBar.classList.remove('indeterminate');
+      progressBar.style.width = Math.round(progress) + '%';
+    }
   }
 }
 
-function saveSettings() {
-  const input = document.getElementById('api-key-input');
-  state.apiKey = input.value.trim();
-  localStorage.setItem('colorme-api-key', state.apiKey);
-  hideModal('settings-modal');
-  checkApiKey();
+async function getGenerator() {
+  if (generator) return generator;
+
+  if (!modelInitPromise) {
+    modelInitPromise = pipeline('text-generation', MODEL_ID, {
+      dtype: 'q4f16',
+      device: 'webgpu',
+      progress_callback: (event) => {
+        if (event.status === 'progress' && event.progress != null) {
+          updateLoading(
+            `Downloading AI model... ${Math.round(event.progress)}%`,
+            event.progress
+          );
+        } else if (event.status === 'initiate') {
+          updateLoading('Downloading AI model...', 0);
+        } else if (event.status === 'done') {
+          updateLoading('Loading model into memory...', 100);
+        } else if (event.status === 'ready') {
+          updateLoading('Model ready!', 100);
+        }
+      },
+    }).catch(async (err) => {
+      // WebGPU failed — fall back to WASM
+      console.warn('WebGPU not available, falling back to WASM:', err.message);
+      updateLoading('Downloading AI model (CPU mode)...', 0);
+      return pipeline('text-generation', MODEL_ID, {
+        dtype: 'q4',
+        device: 'wasm',
+        progress_callback: (event) => {
+          if (event.status === 'progress' && event.progress != null) {
+            updateLoading(
+              `Downloading AI model... ${Math.round(event.progress)}%`,
+              event.progress
+            );
+          }
+        },
+      });
+    });
+  }
+
+  generator = await modelInitPromise;
+  return generator;
 }
 
-// ============ AI Generation ============
 async function generateColoringPage(prompt) {
-  if (!state.apiKey) {
-    document.getElementById('api-hint').classList.remove('hidden');
-    return;
-  }
-
   const inputRow = document.querySelector('#ai-section .input-row');
+  const aiHint = document.querySelector('#ai-section .hint');
   const templateSection = document.getElementById('template-section');
   const loading = document.getElementById('loading');
 
   inputRow.style.display = 'none';
+  if (aiHint) aiHint.style.display = 'none';
   templateSection.style.display = 'none';
   loading.classList.remove('hidden');
 
-  try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': state.apiKey,
-        'anthropic-version': '2023-06-01',
-        'anthropic-dangerous-direct-browser-access': 'true',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-5-20250929',
-        max_tokens: 4096,
-        messages: [{
-          role: 'user',
-          content: `Generate a simple SVG coloring page of: "${prompt}"
+  updateLoading('Preparing AI model...', null);
 
-Requirements:
-- SVG with viewBox="0 0 800 600" and xmlns="http://www.w3.org/2000/svg"
-- Use basic SVG elements: <path>, <circle>, <rect>, <ellipse>, <polygon>
-- Each distinct colorable region must be a separate element with class="colorable"
-- All colorable regions: fill="white" stroke="black" stroke-width="2"
-- Non-colorable detail lines use fill="none" stroke="black"
-- Simple, cute design with large clearly-defined regions for young children to color
-- Between 10-25 colorable regions total
-- Center the main subject in the viewBox
-- No <text>, <script>, <style>, <image>, or <foreignObject> elements
-- No inline styles, no CSS
-- Output ONLY the raw SVG code. No markdown fences, no backticks, no explanation.`
-        }],
-      }),
+  try {
+    const gen = await getGenerator();
+
+    updateLoading('Generating coloring page...', null);
+
+    const messages = [
+      {
+        role: 'system',
+        content: `You generate SVG coloring pages. Output ONLY valid SVG code, nothing else.
+Rules:
+- <svg viewBox="0 0 800 600" xmlns="http://www.w3.org/2000/svg">
+- Use: rect, circle, ellipse, polygon, path
+- Each colorable region: class="colorable" fill="white" stroke="black" stroke-width="2"
+- Simple cute design, 8-15 large regions, centered
+- No text/script/style elements
+- Close all tags properly`
+      },
+      {
+        role: 'user',
+        content: `Generate SVG coloring page of: ${prompt}`
+      }
+    ];
+
+    const output = await gen(messages, {
+      max_new_tokens: 1500,
+      do_sample: true,
+      temperature: 0.7,
+      top_p: 0.9,
     });
 
-    if (!response.ok) {
-      const err = await response.json().catch(() => ({}));
-      throw new Error(err.error?.message || `API error ${response.status}`);
-    }
+    const reply = output[0].generated_text.at(-1).content;
+    const svgMatch = reply.match(/<svg[\s\S]*?<\/svg>/);
 
-    const data = await response.json();
-    let svgText = data.content[0].text;
-
-    // Extract SVG if wrapped in other text
-    const svgMatch = svgText.match(/<svg[\s\S]*?<\/svg>/);
     if (svgMatch) {
       loadSVG(svgMatch[0]);
       hideModal('create-modal');
     } else {
-      throw new Error('No valid SVG found in response');
+      throw new Error('Model did not produce valid SVG. Try a simpler description.');
     }
   } catch (error) {
     console.error('Generation error:', error);
@@ -698,6 +686,7 @@ Requirements:
   } finally {
     loading.classList.add('hidden');
     inputRow.style.display = '';
+    if (aiHint) aiHint.style.display = '';
     templateSection.style.display = '';
   }
 }
@@ -707,7 +696,7 @@ async function exportToPNG() {
   const container = document.getElementById('canvas-container');
   const cw = container.offsetWidth;
   const ch = container.offsetHeight;
-  const scale = 2; // Export at 2x for quality
+  const scale = 2;
 
   const exportCanvas = document.createElement('canvas');
   exportCanvas.width = cw * scale;
@@ -715,11 +704,9 @@ async function exportToPNG() {
   const exportCtx = exportCanvas.getContext('2d');
   exportCtx.scale(scale, scale);
 
-  // White background
   exportCtx.fillStyle = '#FFFFFF';
   exportCtx.fillRect(0, 0, cw, ch);
 
-  // Draw SVG layer
   if (state.hasSVG) {
     try {
       const svgClone = svgContainer.cloneNode(true);
@@ -739,7 +726,6 @@ async function exportToPNG() {
         };
         img.onerror = () => {
           URL.revokeObjectURL(url);
-          // Fallback: try data URL approach
           const svgB64 = btoa(unescape(encodeURIComponent(svgData)));
           const img2 = new Image();
           img2.onload = () => {
@@ -756,10 +742,8 @@ async function exportToPNG() {
     }
   }
 
-  // Draw freehand canvas layer on top
   exportCtx.drawImage(canvas, 0, 0, cw, ch);
 
-  // Trigger download
   const link = document.createElement('a');
   link.download = 'colorme-drawing.png';
   link.href = exportCanvas.toDataURL('image/png');

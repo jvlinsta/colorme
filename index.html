@@ -67,11 +67,6 @@
             <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/>
           </svg>
         </button>
-        <button id="btn-settings" class="tool-btn settings-btn" title="Settings">
-          <svg viewBox="0 0 24 24" width="24" height="24">
-            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.6 3.6 0 0112 15.6z" fill="currentColor"/>
-          </svg>
-        </button>
       </div>
     </div>
 
@@ -118,30 +113,17 @@
           <input type="text" id="prompt-input" placeholder="a happy dinosaur, a princess castle..." autocomplete="off">
           <button id="btn-generate">Create!</button>
         </div>
-        <p id="api-hint" class="hint hidden">You need an API key to create custom pages. <button id="btn-open-settings" class="link-btn">Add one in Settings</button></p>
+        <p class="hint">Runs AI locally in your browser — no account needed.</p>
       </div>
       <div id="loading" class="hidden">
-        <div class="spinner"></div>
-        <p>Creating your coloring page...</p>
+        <div class="progress-container">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+        <p id="loading-text">Preparing AI model...</p>
       </div>
     </div>
   </div>
 
-  <!-- Settings Modal -->
-  <div id="settings-modal" class="modal hidden">
-    <div class="modal-overlay"></div>
-    <div class="modal-content settings-content">
-      <button class="close-btn" data-modal="settings-modal">&times;</button>
-      <h2>Settings</h2>
-      <label for="api-key-input">Anthropic API Key</label>
-      <p class="hint">Required for AI-generated coloring pages. Your key stays in your browser only.</p>
-      <input type="password" id="api-key-input" placeholder="sk-ant-...">
-      <div class="settings-actions">
-        <button id="btn-save-settings" class="primary-btn">Save</button>
-      </div>
-    </div>
-  </div>
-
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>
