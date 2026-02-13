@@ -625,12 +625,12 @@ html, body {
 /* ============ Version Tag ============ */
 #version-tag {
   position: fixed;
-  bottom: 2px;
-  right: 4px;
+  top: 2px;
+  left: 4px;
   font-size: 10px;
-  color: #ccc;
+  color: #bbb;
   pointer-events: none;
-  z-index: 5;
+  z-index: 20;
 }
 
 @media (max-width: 360px) {
