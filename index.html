@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <title>ColorMe - Drawing & Coloring for Kids</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- Toolbar -->
+    <div id="toolbar">
+      <div class="tool-group">
+        <button id="btn-draw" class="tool-btn active" title="Draw">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M3 17.25V21h3.75L17.81 9.94l-3.75-3.75L3 17.25z" fill="currentColor"/>
+            <path d="M20.71 7.04a1 1 0 000-1.41l-2.34-2.34a1 1 0 00-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="btn-fill" class="tool-btn" title="Fill Color">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M16.56 8.94L7.62 0 6.21 1.41l2.38 2.38-5.15 5.15a1.49 1.49 0 000 2.12l5.5 5.5c.29.29.68.44 1.06.44s.77-.15 1.06-.44l5.5-5.5c.59-.58.59-1.53 0-2.12zM5.21 10L10 5.21 14.79 10H5.21zM19 11.5s-2 2.17-2 3.5c0 1.1.9 2 2 2s2-.9 2-2c0-1.33-2-3.5-2-3.5z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="btn-eraser" class="tool-btn" title="Eraser">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M16.24 3.56l4.95 4.94c.78.79.78 2.05 0 2.84L12 20.53a4.01 4.01 0 01-5.66 0L2.81 17c-.78-.78-.78-2.05 0-2.83l10.6-10.6c.79-.78 2.05-.78 2.83 0zm-1.41 1.42L6.44 13.37 10.63 17.56l8.38-8.4-4.18-4.18z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="tool-separator"></div>
+
+      <div class="tool-group">
+        <button id="btn-undo" class="tool-btn" title="Undo">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M12.5 8c-2.65 0-5.05 1.04-6.83 2.73L3 8v9h9l-2.83-2.83A7.95 7.95 0 0112.5 10c3.04 0 5.64 1.71 6.96 4.21l1.77-.77A9.96 9.96 0 0012.5 8z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="btn-clear" class="tool-btn" title="Clear All">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M6 19c0 1.1.9 2 2 2h8c1.1 0 2-.9 2-2V7H6v12zM19 4h-3.5l-1-1h-5l-1 1H5v2h14V4z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+
+      <div class="tool-separator"></div>
+
+      <div class="tool-group">
+        <button id="btn-create" class="tool-btn create-btn" title="Create Coloring Page">
+          <svg viewBox="0 0 24 24" width="24" height="24">
+            <path d="M19.89 10.105a8.696 8.696 0 00-.789-1.456l-1.658 1.119a6.606 6.606 0 01.6 1.107l1.847-.77zM19.396 12.584l-1.924.402c.07.504.094.96.072 1.41l1.965.192a9.453 9.453 0 00-.113-2.004zM15.98 5.89l-1.12 1.658a6.58 6.58 0 011.107.6l1.119-1.657a8.676 8.676 0 00-1.107-.6zM12 3.007a9.027 9.027 0 00-1 .056v1.97c.33-.033.662-.05 1-.05.338 0 .67.017 1 .05V3.063A9.027 9.027 0 0012 3.007z" fill="currentColor"/>
+            <path d="M12 7a5 5 0 100 10 5 5 0 000-10zm0 8a3 3 0 110-6 3 3 0 010 6z" fill="currentColor"/>
+            <circle cx="12" cy="12" r="1.5" fill="currentColor"/>
+          </svg>
+          <span class="btn-label">Create</span>
+        </button>
+      </div>
+
+      <div class="tool-separator"></div>
+
+      <div class="tool-group">
+        <button id="btn-export" class="tool-btn" title="Save as Picture">
+          <svg viewBox="0 0 24 24" width="28" height="28">
+            <path d="M19 9h-4V3H9v6H5l7 7 7-7zM5 18v2h14v-2H5z" fill="currentColor"/>
+          </svg>
+        </button>
+        <button id="btn-settings" class="tool-btn settings-btn" title="Settings">
+          <svg viewBox="0 0 24 24" width="24" height="24">
+            <path d="M19.14 12.94c.04-.3.06-.61.06-.94 0-.32-.02-.64-.07-.94l2.03-1.58a.49.49 0 00.12-.61l-1.92-3.32a.49.49 0 00-.59-.22l-2.39.96c-.5-.38-1.03-.7-1.62-.94l-.36-2.54a.484.484 0 00-.48-.41h-3.84c-.24 0-.43.17-.47.41l-.36 2.54c-.59.24-1.13.57-1.62.94l-2.39-.96a.49.49 0 00-.59.22L2.74 8.87c-.12.21-.08.47.12.61l2.03 1.58c-.05.3-.07.62-.07.94s.02.64.07.94l-2.03 1.58a.49.49 0 00-.12.61l1.92 3.32c.12.22.37.29.59.22l2.39-.96c.5.38 1.03.7 1.62.94l.36 2.54c.05.24.24.41.48.41h3.84c.24 0 .44-.17.47-.41l.36-2.54c.59-.24 1.13-.56 1.62-.94l2.39.96c.22.08.47 0 .59-.22l1.92-3.32c.12-.22.07-.47-.12-.61l-2.01-1.58zM12 15.6A3.6 3.6 0 1115.6 12 3.6 3.6 0 0112 15.6z" fill="currentColor"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Canvas Area -->
+    <div id="canvas-container">
+      <svg id="coloring-svg" xmlns="http://www.w3.org/2000/svg" preserveAspectRatio="xMidYMid meet"></svg>
+      <canvas id="drawing-canvas"></canvas>
+      <div id="empty-state">
+        <p>Tap <strong>Create</strong> to make a coloring page</p>
+        <p>or just start drawing!</p>
+      </div>
+    </div>
+
+    <!-- Color Palette -->
+    <div id="palette">
+      <div id="colors"></div>
+      <div id="brush-sizes">
+        <button class="size-btn" data-size="4" title="Small">
+          <span class="size-dot size-small"></span>
+        </button>
+        <button class="size-btn active" data-size="12" title="Medium">
+          <span class="size-dot size-medium"></span>
+        </button>
+        <button class="size-btn" data-size="24" title="Large">
+          <span class="size-dot size-large"></span>
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Modal -->
+  <div id="create-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <button class="close-btn" data-modal="create-modal">&times;</button>
+      <h2>Create a Coloring Page</h2>
+      <div id="template-section">
+        <h3>Pick a template:</h3>
+        <div id="template-grid"></div>
+      </div>
+      <div id="ai-section">
+        <h3>Or describe what you want:</h3>
+        <div class="input-row">
+          <input type="text" id="prompt-input" placeholder="a happy dinosaur, a princess castle..." autocomplete="off">
+          <button id="btn-generate">Create!</button>
+        </div>
+        <p id="api-hint" class="hint hidden">You need an API key to create custom pages. <button id="btn-open-settings" class="link-btn">Add one in Settings</button></p>
+      </div>
+      <div id="loading" class="hidden">
+        <div class="spinner"></div>
+        <p>Creating your coloring page...</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings Modal -->
+  <div id="settings-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content settings-content">
+      <button class="close-btn" data-modal="settings-modal">&times;</button>
+      <h2>Settings</h2>
+      <label for="api-key-input">Anthropic API Key</label>
+      <p class="hint">Required for AI-generated coloring pages. Your key stays in your browser only.</p>
+      <input type="password" id="api-key-input" placeholder="sk-ant-...">
+      <div class="settings-actions">
+        <button id="btn-save-settings" class="primary-btn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
