@@ -3,7 +3,10 @@
 // ============================================================
 const APP_VERSION = 'b31e446';
 
-import { AutoTokenizer } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3';
+import { Client } from 'https://cdn.jsdelivr.net/npm/@gradio/client/dist/index.min.js';
+
+const HF_SPACE = 'jordyvl/colorme-generator';
+let gradioApp = null;
 
 // ============ Constants ============
 const COLORS = [
@@ -15,32 +18,6 @@ const COLORS = [
 ];
 
 const MAX_UNDO = 30;
-
-// ============ SD-Turbo Constants ============
-const SD_TURBO_BASE = 'https://huggingface.co/schmuell/sd-turbo-ort-web/resolve/main';
-const SD_TURBO_MODELS = {
-  text_encoder: {
-    url: 'text_encoder/model.onnx', size: 650,
-    opt: { freeDimensionOverrides: { batch_size: 1 } },
-  },
-  unet: {
-    url: 'unet/model.onnx', size: 1653,
-    opt: { freeDimensionOverrides: { batch_size: 1, num_channels: 4, height: 64, width: 64, sequence_length: 77 } },
-  },
-  vae_decoder: {
-    url: 'vae_decoder/model.onnx', size: 94,
-    opt: { freeDimensionOverrides: { batch_size: 1, num_channels_latent: 4, height_latent: 64, width_latent: 64 } },
-  },
-};
-const TOKENIZER_MODEL = 'Xenova/clip-vit-base-patch16';
-const PROMPT_PREFIX = 'kawaii cute simple ';
-const PROMPT_SUFFIX = ', white background, centered, simple, flat colors, no detail';
-const NEGATIVE_PROMPT = 'detailed, realistic, photographic, complex background, scenery, texture, text, watermark, multiple objects, frame, border, pattern';
-const TOTAL_MODEL_MB = 650 + 1653 + 94;
-
-// SD-Turbo scheduler constants
-const SIGMA = 14.6146;
-const VAE_SCALING = 0.18215;
 
 // ============ State ============
 const state = {
@@ -55,12 +32,6 @@ const state = {
   hasSVG: false,
   hasRasterBG: false,
 };
-
-// ============ Model State ============
-const sdSessions = {};
-let sdTokenizer = null;
-let sdInitPromise = null;
-let hasWebGPU = false;
 
 // ============ DOM Refs ============
 let canvas, ctx, bgCanvas, bgCtx, svgContainer, emptyState;
@@ -211,22 +182,6 @@ async function init() {
   setupPalette();
   setupToolbar();
   setupModals();
-
-  hasWebGPU = await checkWebGPU();
-  if (!hasWebGPU) {
-    const hint = document.querySelector('#ai-section .hint');
-    if (hint) hint.textContent = 'AI generation requires Chrome 121+ with WebGPU. Use templates instead.';
-  }
-}
-
-async function checkWebGPU() {
-  if (typeof ort === 'undefined') return false;
-  if (!navigator.gpu) return false;
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (!adapter) return false;
-    return adapter.features.has('shader-f16');
-  } catch { return false; }
 }
 
 // ============ Canvas Setup ============
@@ -744,282 +699,19 @@ function setupTemplates() {
   });
 }
 
-// ============ SD-Turbo Model Loading ============
-function updateLoading(text, progress) {
+// ============ Loading UI ============
+function updateLoading(text) {
   const loadingText = document.getElementById('loading-text');
   const progressBar = document.getElementById('progress-bar');
-
   if (loadingText) loadingText.textContent = text;
-
   if (progressBar) {
-    if (progress === null || progress === undefined) {
-      progressBar.classList.add('indeterminate');
-      progressBar.style.width = '30%';
-    } else {
-      progressBar.classList.remove('indeterminate');
-      progressBar.style.width = Math.round(progress) + '%';
-    }
+    progressBar.classList.add('indeterminate');
+    progressBar.style.width = '30%';
   }
-}
-
-async function fetchModelCached(modelUrl, sizeMB, onProgress) {
-  const cache = await caches.open('colorme-sd-turbo');
-
-  const cached = await cache.match(modelUrl);
-  if (cached) {
-    onProgress(sizeMB, sizeMB);
-    return await cached.arrayBuffer();
-  }
-
-  const response = await fetch(modelUrl);
-  const reader = response.body.getReader();
-  const contentLength = +response.headers.get('Content-Length') || sizeMB * 1024 * 1024;
-  let received = 0;
-  const chunks = [];
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.length;
-    onProgress(received / (1024 * 1024), sizeMB);
-  }
-
-  const blob = new Blob(chunks);
-  try {
-    await cache.put(modelUrl, new Response(blob.slice()));
-  } catch (e) {
-    console.warn('Cache storage full, model will be re-downloaded next time:', e.message);
-  }
-  return await blob.arrayBuffer();
-}
-
-async function areModelsCached() {
-  try {
-    const cache = await caches.open('colorme-sd-turbo');
-    for (const model of Object.values(SD_TURBO_MODELS)) {
-      const url = `${SD_TURBO_BASE}/${model.url}`;
-      if (!(await cache.match(url))) return false;
-    }
-    return true;
-  } catch { return false; }
-}
-
-async function initSDTurbo() {
-  ort.env.wasm.numThreads = 1;
-  ort.env.wasm.simd = true;
-
-  sdTokenizer = await AutoTokenizer.from_pretrained(TOKENIZER_MODEL);
-
-  let downloadedMB = 0;
-
-  const baseOpts = {
-    executionProviders: ['webgpu'],
-    enableMemPattern: false,
-    enableCpuMemArena: false,
-    preferredOutputLocation: { last_hidden_state: 'gpu-buffer' },
-    extra: {
-      session: {
-        disable_prepacking: '1',
-        use_device_allocator_for_initializers: '1',
-        use_ort_model_bytes_directly: '1',
-        use_ort_model_bytes_for_initializers: '1',
-      }
-    },
-  };
-
-  for (const [name, model] of Object.entries(SD_TURBO_MODELS)) {
-    const url = `${SD_TURBO_BASE}/${model.url}`;
-    const bytes = await fetchModelCached(url, model.size, (fileMB) => {
-      const pct = ((downloadedMB + fileMB) / TOTAL_MODEL_MB) * 100;
-      updateLoading(`Downloading model... ${Math.round(pct)}%`, pct);
-    });
-    downloadedMB += model.size;
-
-    updateLoading(`Loading ${name}...`, null);
-    const sessOpts = { ...baseOpts, ...model.opt };
-    sdSessions[name] = await ort.InferenceSession.create(bytes, sessOpts);
-  }
-}
-
-async function ensureSDModel() {
-  if (sdSessions.unet) return;
-  if (!sdInitPromise) {
-    sdInitPromise = initSDTurbo();
-  }
-  await sdInitPromise;
-}
-
-// ============ SD-Turbo Inference ============
-function generateLatentNoise() {
-  const size = 1 * 4 * 64 * 64;
-  const data = new Float32Array(size);
-  for (let i = 0; i < size; i++) {
-    const u = Math.random(), v = Math.random();
-    data[i] = Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) * SIGMA;
-  }
-  return new ort.Tensor('float32', data, [1, 4, 64, 64]);
-}
-
-function scaleModelInput(tensor) {
-  const divi = Math.sqrt(SIGMA * SIGMA + 1);
-  const out = new Float32Array(tensor.data.length);
-  for (let i = 0; i < tensor.data.length; i++) {
-    out[i] = tensor.data[i] / divi;
-  }
-  return new ort.Tensor('float32', out, tensor.dims);
-}
-
-function eulerStep(modelOutput, sample) {
-  const out = new Float32Array(modelOutput.data.length);
-  for (let i = 0; i < modelOutput.data.length; i++) {
-    const predOriginal = sample.data[i] - SIGMA * modelOutput.data[i];
-    const derivative = (sample.data[i] - predOriginal) / SIGMA;
-    const dt = 0 - SIGMA;
-    out[i] = (sample.data[i] + derivative * dt) / VAE_SCALING;
-  }
-  return new ort.Tensor('float32', out, modelOutput.dims);
-}
-
-async function runSDTurbo(prompt) {
-  const fullPrompt = PROMPT_PREFIX + prompt + PROMPT_SUFFIX;
-
-  // 1. Tokenize
-  const tokens = await sdTokenizer(fullPrompt, {
-    padding: 'max_length',
-    max_length: 77,
-    truncation: true,
-  });
-
-  // 2. Text encode
-  const inputIds = new ort.Tensor('int32', Int32Array.from(tokens.input_ids.data), [1, 77]);
-  const encoderResult = await sdSessions.text_encoder.run({ input_ids: inputIds });
-  const hiddenStates = encoderResult.last_hidden_state;
-
-  // 3. Generate random latent noise
-  const latent = generateLatentNoise();
-  const scaledLatent = scaleModelInput(latent);
-
-  // 4. UNet denoise (single step for Turbo)
-  const timestep = new ort.Tensor('int64', [999n], [1]);
-  const unetResult = await sdSessions.unet.run({
-    sample: scaledLatent,
-    timestep: timestep,
-    encoder_hidden_states: hiddenStates,
-  });
-  const noisePred = unetResult.out_sample;
-
-  // 5. Euler step → denoised latent
-  const denoised = eulerStep(noisePred, latent);
-
-  // 6. VAE decode
-  const vaeResult = await sdSessions.vae_decoder.run({ latent_sample: denoised });
-  const decoded = vaeResult.sample;
-
-  // 7. Convert tensor to ImageData (NCHW → RGBA)
-  const [, , imgH, imgW] = decoded.dims;
-  const imageData = new ImageData(imgW, imgH);
-  const pixels = decoded.data;
-  for (let y = 0; y < imgH; y++) {
-    for (let x = 0; x < imgW; x++) {
-      const srcIdx = y * imgW + x;
-      const dstIdx = (y * imgW + x) * 4;
-      const r = Math.round(Math.min(255, Math.max(0, (pixels[0 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
-      const g = Math.round(Math.min(255, Math.max(0, (pixels[1 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
-      const b = Math.round(Math.min(255, Math.max(0, (pixels[2 * imgH * imgW + srcIdx] / 2 + 0.5) * 255)));
-      imageData.data[dstIdx] = r;
-      imageData.data[dstIdx + 1] = g;
-      imageData.data[dstIdx + 2] = b;
-      imageData.data[dstIdx + 3] = 255;
-    }
-  }
-
-  return imageData;
-}
-
-// ============ Post-processing: Raster → Coloring Page ============
-function toColoringPage(imageData) {
-  const { width, height } = imageData;
-  const { data } = imageData;
-
-  // 1. Grayscale
-  const gray = new Uint8Array(width * height);
-  for (let i = 0; i < width * height; i++) {
-    gray[i] = Math.round(0.299 * data[i * 4] + 0.587 * data[i * 4 + 1] + 0.114 * data[i * 4 + 2]);
-  }
-
-  // 2. Threshold: keep only dark outlines (< 80)
-  const binary = new Uint8Array(width * height);
-  for (let i = 0; i < gray.length; i++) {
-    binary[i] = gray[i] < 80 ? 0 : 255;
-  }
-
-  // 3. MinFilter(3): thicken lines (black expands)
-  const thick = minFilter(binary, width, height, 3);
-
-  // 4. MedianFilter(7): remove noise (majority vote on binary)
-  const clean = medianFilter(thick, width, height, 7);
-
-  // Convert back to RGBA ImageData
-  const result = new ImageData(width, height);
-  for (let i = 0; i < width * height; i++) {
-    result.data[i * 4] = clean[i];
-    result.data[i * 4 + 1] = clean[i];
-    result.data[i * 4 + 2] = clean[i];
-    result.data[i * 4 + 3] = 255;
-  }
-  return result;
-}
-
-function minFilter(data, width, height, size) {
-  const out = new Uint8Array(data.length);
-  const half = Math.floor(size / 2);
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let min = 255;
-      for (let dy = -half; dy <= half; dy++) {
-        const ny = Math.min(height - 1, Math.max(0, y + dy));
-        for (let dx = -half; dx <= half; dx++) {
-          const nx = Math.min(width - 1, Math.max(0, x + dx));
-          const v = data[ny * width + nx];
-          if (v < min) min = v;
-        }
-      }
-      out[y * width + x] = min;
-    }
-  }
-  return out;
-}
-
-function medianFilter(data, width, height, size) {
-  const out = new Uint8Array(data.length);
-  const half = Math.floor(size / 2);
-  const total = size * size;
-  const majority = total >> 1;
-
-  for (let y = 0; y < height; y++) {
-    for (let x = 0; x < width; x++) {
-      let zeros = 0;
-      for (let dy = -half; dy <= half; dy++) {
-        const ny = Math.min(height - 1, Math.max(0, y + dy));
-        for (let dx = -half; dx <= half; dx++) {
-          const nx = Math.min(width - 1, Math.max(0, x + dx));
-          if (data[ny * width + nx] === 0) zeros++;
-        }
-      }
-      out[y * width + x] = zeros > majority ? 0 : 255;
-    }
-  }
-  return out;
 }
 
 // ============ Generate Coloring Page ============
 async function generateColoringPage(prompt) {
-  if (!hasWebGPU) {
-    alert('AI image generation requires a browser with WebGPU support (Chrome 121+).');
-    return;
-  }
-
   const inputRow = document.querySelector('#ai-section .input-row');
   const aiHint = document.querySelector('#ai-section .hint');
   const templateSection = document.getElementById('template-section');
@@ -1029,28 +721,40 @@ async function generateColoringPage(prompt) {
   if (aiHint) aiHint.style.display = 'none';
   templateSection.style.display = 'none';
   loading.classList.remove('hidden');
-
-  const cached = await areModelsCached();
-  if (cached) {
-    updateLoading('Loading AI model...', null);
-  } else {
-    updateLoading('Downloading AI model (~2.4 GB)... first time only', 0);
-  }
+  updateLoading('Generating coloring page...');
 
   try {
-    await ensureSDModel();
+    if (!gradioApp) {
+      updateLoading('Connecting to AI server...');
+      gradioApp = await Client.connect(HF_SPACE);
+    }
 
-    updateLoading('Generating image...', null);
-    const rawImage = await runSDTurbo(prompt);
+    updateLoading('Generating coloring page...');
+    const result = await gradioApp.predict('/predict', { prompt });
 
-    updateLoading('Processing coloring page...', null);
-    const coloringPage = toColoringPage(rawImage);
+    // Fetch the returned image and draw to an offscreen canvas
+    const imgUrl = result.data[0].url;
+    const img = await new Promise((resolve, reject) => {
+      const el = new Image();
+      el.crossOrigin = 'anonymous';
+      el.onload = () => resolve(el);
+      el.onerror = () => reject(new Error('Failed to load generated image'));
+      el.src = imgUrl;
+    });
 
-    displayColoringPage(coloringPage);
+    const offscreen = document.createElement('canvas');
+    offscreen.width = img.naturalWidth;
+    offscreen.height = img.naturalHeight;
+    const offCtx = offscreen.getContext('2d');
+    offCtx.drawImage(img, 0, 0);
+    const imageData = offCtx.getImageData(0, 0, offscreen.width, offscreen.height);
+
+    displayColoringPage(imageData);
     hideModal('create-modal');
   } catch (error) {
     console.error('Generation error:', error);
-    alert('Could not create coloring page: ' + error.message);
+    gradioApp = null; // Reset connection on failure
+    alert('Could not create coloring page. Please try again.');
   } finally {
     loading.classList.add('hidden');
     inputRow.style.display = '';
